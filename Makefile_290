@@ -1,0 +1,16 @@
+CC=gcc
+CFLAGS=-Wall -Wextra -pthread
+
+# Builds the agent, and the controller too once controller_290.c exists
+TARGETS=agent $(if $(wildcard controller_290.c),controller)
+
+all: $(TARGETS)
+
+agent: agent_290.c
+	$(CC) $(CFLAGS) -o agent agent_290.c
+
+controller: controller_290.c
+	$(CC) $(CFLAGS) -o controller controller_290.c
+
+clean:
+	rm -f agent controller
