@@ -170,8 +170,8 @@ Tick these off as each step is completed and committed.
 
 - [x] Personalised constants (port, SID, token, log file, storage path)
 - [x] Listening socket, thread-per-client concurrency, thread-safe logging
-- [ ] Line framing (`read_line`) and `reply()` with SID tag
-- [ ] `AUTH` and authentication gate
+- [x] Line framing (`read_line`) and `reply()` with SID tag
+- [x] `AUTH` and authentication gate
 - [ ] `SYSINFO`
 - [ ] `LISTPROC`
 - [ ] `EXEC` (whitelist)

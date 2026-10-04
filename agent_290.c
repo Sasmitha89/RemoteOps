@@ -1,3 +1,7 @@
+/* agent_290.c - RemoteOps Agent (server)
+ * IE3090 Network Programming - registration number IT24102290
+ * DAY 2 (part 1): line framing, reply() with SID tag, AUTH.
+ */
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
@@ -14,16 +18,22 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
+
 #define REG_NO        "IT24102290"
-#define AGENT_PORT    9410                 /* 7000 + 2410 */
-#define SID           "0922"               /* last 4 digits "2290" reversed */
+#define AGENT_PORT    9410               
+#define SID           "0922"               
 #define AUTH_TOKEN    "OPS-2290"
 #define LOG_FILE      "remoteops_IT24102290.log"
 #define STORE_DIR     "./agentfiles/IT24102290"
-#define MAX_FILE_SIZE (10 * 1024 * 1024)   /* 10 MB, used for ERR 004 later */
+#define MAX_FILE_SIZE (10 * 1024 * 1024)   
 
 
-/* Many client threads log at once, so a mutex stops their lines mixing. */
+#define LINE_MAX_LEN  1024                 
+#define RBUF_SIZE     8192                
+#define REPLY_MAX     20480                
+
+
+
 static pthread_mutex_t log_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static void log_event(const char *fmt, ...)
@@ -50,11 +60,103 @@ static void log_event(const char *fmt, ...)
 
 
 typedef struct {
-    int  fd;                        /* TCP socket for this client */
-    struct sockaddr_in addr;        /* client's address */
-    char ip[INET_ADDRSTRLEN];       /* client's IP as text */
-    int  authed;                    
+    int  fd;                       
+    struct sockaddr_in addr;       
+    char ip[INET_ADDRSTRLEN];       
+    int  authed;                        
+    int  auth_fails;               
+    char   rbuf[RBUF_SIZE];         
+    size_t rlen;                    
 } client_t;
+
+
+
+
+static int send_all(int fd, const void *buf, size_t len)
+{
+    const char *p = buf;
+    while (len > 0) {
+        ssize_t n = send(fd, p, len, MSG_NOSIGNAL);
+        if (n < 0) { if (errno == EINTR) continue; return -1; }
+        p   += n;
+        len -= (size_t)n;
+    }
+    return 0;
+}
+
+
+static int reply(client_t *c, const char *fmt, ...)
+{
+    char body[REPLY_MAX], line[REPLY_MAX + 32];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(body, sizeof body, fmt, ap);
+    va_end(ap);
+    int n = snprintf(line, sizeof line, "%s SID:%s\n", body, SID);
+    return send_all(c->fd, line, (size_t)n);
+}
+
+
+static int read_line(client_t *c, char *out, size_t outsz)
+{
+    for (;;) {
+       
+        char *nl = memchr(c->rbuf, '\n', c->rlen);
+        if (nl) {
+            size_t consumed = (size_t)(nl - c->rbuf) + 1;   
+            size_t linelen  = consumed - 1;
+            if (linelen >= outsz) return -2;
+            memcpy(out, c->rbuf, linelen);
+            if (linelen > 0 && out[linelen - 1] == '\r') linelen--;  
+            out[linelen] = '\0';
+           
+            memmove(c->rbuf, c->rbuf + consumed, c->rlen - consumed);
+            c->rlen -= consumed;
+            return (int)linelen;
+        }
+        if (c->rlen == RBUF_SIZE) return -2;
+
+        
+        ssize_t n = recv(c->fd, c->rbuf + c->rlen, RBUF_SIZE - c->rlen, 0);
+        if (n == 0) return -1;                             
+        if (n < 0) { if (errno == EINTR) continue; return -1; }
+        c->rlen += (size_t)n;
+    }
+}
+
+
+
+static int handle_command(client_t *c, char *line)
+{
+    char *save = NULL;
+    char *cmd = strtok_r(line, " ", &save);
+    if (!cmd) return reply(c, "ERR 007 EMPTY_COMMAND") < 0;
+
+    log_event("CMD %s from %s", cmd, c->ip);       /* never log the token itself */
+
+    if (strcmp(cmd, "AUTH") == 0) {
+        char *tok = strtok_r(NULL, " ", &save);
+        if (tok && strcmp(tok, AUTH_TOKEN) == 0) {
+            c->authed = 1;
+            log_event("AUTH OK %s", c->ip);
+            return reply(c, "OK AUTHENTICATED") < 0;
+        }
+        c->auth_fails++;
+        log_event("AUTH FAILED %s (attempt %d)", c->ip, c->auth_fails);
+        if (reply(c, "ERR 001 AUTH_FAILED") < 0) return 1;
+        return c->auth_fails >= 3;                 
+    }
+
+   
+    if (!c->authed) return reply(c, "ERR 003 NOT_AUTHENTICATED") < 0;
+
+    if (strcmp(cmd, "QUIT") == 0) {
+        reply(c, "OK BYE");
+        return 1;
+    }
+
+       return reply(c, "ERR 006 UNKNOWN_COMMAND") < 0;
+}
 
 
 static void *client_thread(void *arg)
@@ -63,15 +165,12 @@ static void *client_thread(void *arg)
     inet_ntop(AF_INET, &c->addr.sin_addr, c->ip, sizeof c->ip);
     log_event("CONNECT %s:%d", c->ip, ntohs(c->addr.sin_port));
 
-    const char *hello = "OK HELLO SID:" SID "\n";
-    send(c->fd, hello, strlen(hello), MSG_NOSIGNAL);
-
-    /* Day 1: just wait until the client disconnects (graceful or not). */
-    char buf[256];
+    char line[LINE_MAX_LEN];
     for (;;) {
-        ssize_t n = recv(c->fd, buf, sizeof buf, 0);
-        if (n == 0) break;                         /* client closed */
-        if (n < 0) { if (errno == EINTR) continue; break; }
+        int n = read_line(c, line, sizeof line);
+        if (n == -2) { reply(c, "ERR 008 LINE_TOO_LONG"); break; }
+        if (n < 0)   break;                        /* disconnect*/
+        if (handle_command(c, line)) break;
     }
 
     close(c->fd);
@@ -83,21 +182,21 @@ static void *client_thread(void *arg)
 
 int main(void)
 {
-    signal(SIGPIPE, SIG_IGN);       /* writing to a dead client must not kill us */
+    signal(SIGPIPE, SIG_IGN);     
     mkdir("./agentfiles", 0755);
     mkdir(STORE_DIR, 0755);
 
-    int lfd = socket(AF_INET, SOCK_STREAM, 0);     /* IPv4 + TCP */
+    int lfd = socket(AF_INET, SOCK_STREAM, 0);     
     if (lfd < 0) { perror("socket"); return 1; }
 
-    int yes = 1;                                   /* allow quick restarts */
+    int yes = 1;                                   
     setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof yes);
 
     struct sockaddr_in sa;
     memset(&sa, 0, sizeof sa);
     sa.sin_family      = AF_INET;
-    sa.sin_addr.s_addr = htonl(INADDR_ANY);        /* all network interfaces */
-    sa.sin_port        = htons(AGENT_PORT);        /* 9410 */
+    sa.sin_addr.s_addr = htonl(INADDR_ANY);        
+    sa.sin_port        = htons(AGENT_PORT);      
 
     if (bind(lfd, (struct sockaddr *)&sa, sizeof sa) < 0) { perror("bind"); return 1; }
     if (listen(lfd, 16) < 0) { perror("listen"); return 1; }
@@ -121,6 +220,6 @@ int main(void)
             free(c);
             continue;
         }
-        pthread_detach(tid);        /* thread cleans up after itself */
+        pthread_detach(tid);       
     }
 }
