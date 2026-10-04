@@ -172,9 +172,9 @@ Tick these off as each step is completed and committed.
 - [x] Listening socket, thread-per-client concurrency, thread-safe logging
 - [x] Line framing (`read_line`) and `reply()` with SID tag
 - [x] `AUTH` and authentication gate
-- [ ] `SYSINFO`
-- [ ] `LISTPROC`
-- [ ] `EXEC` (whitelist)
+- [x] `SYSINFO`
+- [x] `LISTPROC`
+- [x] `EXEC` (whitelist)
 - [ ] `PUT` (byte-exact upload, `ERR 004` size limit)
 - [ ] `GET` (byte-exact download, `ERR 005`)
 - [ ] `MONITOR START` / `MONITOR STOP` (UDP stream)
