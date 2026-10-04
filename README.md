@@ -191,7 +191,7 @@ Tick these off as each step is completed and committed.
 | 1 | `SYSINFO` before `AUTH` | `ERR 003 NOT_AUTHENTICATED SID:0922` | |
 | 2 | `AUTH wrong` | `ERR 001 AUTH_FAILED SID:0922` | |
 | 3 | `AUTH OPS-2290` split across two sends (`AU` then `TH OPS-2290\n`) | `OK AUTHENTICATED SID:0922` | |
-| 4 | `AUTH`, unknown command, `QUIT` in one send | OK, `ERR 006`, `OK BYE` | |
+| 4 | `AUTH`, unknown command, `QUIT` in one send | OK, `ERR 006`, `OK BYE SID:0922` | |
 | 5 | 5 simultaneous clients | All served independently | |
 | 6 | Client killed abruptly | Agent keeps running, logs disconnect | |
 
