@@ -1,7 +1,9 @@
 /* agent_290.c - RemoteOps Agent (server)
  * IE3090 Network Programming - registration number IT24102290
- * DAY 3 (part 1): PUT / GET with exact byte counting.
- */
+ * DAY 3: PUT / GET (exact byte counting), UDP MONITOR START/STOP, QUIT.
+ * Concurrency model : one POSIX thread per client connection
+ * Control channel   : TCP, line-based protocol (brief section 2.3)
+ * Monitoring channel: UDP datagrams, one extra thread per monitoring client*/
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
@@ -19,24 +21,24 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
-/*Personalised values (derived from IT24102290) */
+/*Personalised values(IT24102290) */
 #define REG_NO        "IT24102290"
 #define AGENT_PORT    9410                
-#define SID           "0922"               
+#define SID           "0922"              
 #define AUTH_TOKEN    "OPS-2290"
 #define LOG_FILE      "remoteops_IT24102290.log"
 #define STORE_DIR     "./agentfiles/IT24102290"
-#define MAX_FILE_SIZE (10 * 1024 * 1024)   
 
 /*Tunables*/
-#define LINE_MAX_LEN  1024                
-#define RBUF_SIZE     8192                 
-#define REPLY_MAX     20480                
-#define PROC_LIST_MAX 16000               
-#define MAX_FILENAME  100                  
+#define MAX_FILE_SIZE    (10 * 1024 * 1024)  
+#define MONITOR_INTERVAL 2                  
+#define LINE_MAX_LEN     1024
+#define RBUF_SIZE        8192
+#define REPLY_MAX        20480
+#define PROC_LIST_MAX    16000
+#define MAX_FILENAME     100
 
-/*  Logging (thread-safe)  */
-
+/*Logging (thread-safe)*/
 static pthread_mutex_t log_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static void log_event(const char *fmt, ...)
@@ -61,19 +63,28 @@ static void log_event(const char *fmt, ...)
     pthread_mutex_unlock(&log_mutex);
 }
 
-/*Per-client state*/
+/* Per-client state */
 typedef struct {
-    int  fd;                       
-    struct sockaddr_in addr;       
-    char ip[INET_ADDRSTRLEN];      
+    int  fd;                        
+    struct sockaddr_in addr;        
+    char ip[INET_ADDRSTRLEN];
     int  authed;                    
-    int  auth_fails;                
+    int  auth_fails;
+
     char   rbuf[RBUF_SIZE];        
-    size_t rlen;                    
+    size_t rlen;
+
+    /* UDP monitoring */
+    int  mon_active;                
+    int  mon_run;                  
+    int  udp_fd;
+    struct sockaddr_in udp_dest;
+    pthread_t mon_tid;
+    pthread_mutex_t mon_mx;
+    pthread_cond_t  mon_cv;
 } client_t;
 
-/*  Low-level send / receive helpers  */
-
+/*Low-level send / receive helpers */
 static int send_all(int fd, const void *buf, size_t len)
 {
     const char *p = buf;
@@ -85,7 +96,6 @@ static int send_all(int fd, const void *buf, size_t len)
     }
     return 0;
 }
-
 
 static int reply(client_t *c, const char *fmt, ...)
 {
@@ -101,33 +111,28 @@ static int reply(client_t *c, const char *fmt, ...)
 static int read_line(client_t *c, char *out, size_t outsz)
 {
     for (;;) {
-              char *nl = memchr(c->rbuf, '\n', c->rlen);
+        char *nl = memchr(c->rbuf, '\n', c->rlen);
         if (nl) {
-            size_t consumed = (size_t)(nl - c->rbuf) + 1;  
+            size_t consumed = (size_t)(nl - c->rbuf) + 1;
             size_t linelen  = consumed - 1;
             if (linelen >= outsz) return -2;
             memcpy(out, c->rbuf, linelen);
-            if (linelen > 0 && out[linelen - 1] == '\r') linelen--;  
+            if (linelen > 0 && out[linelen - 1] == '\r') linelen--;
             out[linelen] = '\0';
-            
             memmove(c->rbuf, c->rbuf + consumed, c->rlen - consumed);
             c->rlen -= consumed;
             return (int)linelen;
         }
-       
         if (c->rlen == RBUF_SIZE) return -2;
 
-    
         ssize_t n = recv(c->fd, c->rbuf + c->rlen, RBUF_SIZE - c->rlen, 0);
-        if (n == 0) return -1;                             
+        if (n == 0) return -1;
         if (n < 0) { if (errno == EINTR) continue; return -1; }
         c->rlen += (size_t)n;
     }
 }
 
-/* System statistics */
-
-
+/*System statistics*/
 static void build_sysinfo(char *out, size_t sz)
 {
     double load = 0.0;
@@ -160,9 +165,52 @@ static void build_sysinfo(char *out, size_t sz)
     }
     snprintf(out, sz, "SYSINFO %.2f %ld %ld", load, mem_mb, up);
 }
+static void *monitor_thread(void *arg)
+{
+    client_t *c = (client_t *)arg;
+    char stats[128], dgram[192];
 
-/* Command handlers 
- * Each returns 1 if the connection must be closed, otherwise 0. */
+    for (;;) {
+        build_sysinfo(stats, sizeof stats);
+        int n = snprintf(dgram, sizeof dgram, "%s SID:%s\n", stats, SID);
+        sendto(c->udp_fd, dgram, (size_t)n, 0,
+               (struct sockaddr *)&c->udp_dest, sizeof c->udp_dest);
+
+                pthread_mutex_lock(&c->mon_mx);
+        if (c->mon_run) {
+            struct timespec ts;
+            clock_gettime(CLOCK_REALTIME, &ts);
+            ts.tv_sec += MONITOR_INTERVAL;
+            pthread_cond_timedwait(&c->mon_cv, &c->mon_mx, &ts);
+        }
+        int run = c->mon_run;
+        pthread_mutex_unlock(&c->mon_mx);
+        if (!run) break;
+    }
+    return NULL;
+}
+
+static void stop_monitor(client_t *c)
+{
+    if (!c->mon_active) return;
+    pthread_mutex_lock(&c->mon_mx);
+    c->mon_run = 0;
+    pthread_cond_signal(&c->mon_cv);
+    pthread_mutex_unlock(&c->mon_mx);
+    pthread_join(c->mon_tid, NULL);
+    close(c->udp_fd);
+    c->mon_active = 0;
+    log_event("MONITOR STOPPED for %s", c->ip);
+}
+static int valid_filename(const char *s)
+{
+    size_t n = strlen(s);
+    if (n == 0 || n > MAX_FILENAME || s[0] == '.') return 0;
+    for (; *s; s++)
+        if (!isalnum((unsigned char)*s) && *s != '.' && *s != '_' && *s != '-')
+            return 0;
+    return 1;
+}
 
 static int cmd_sysinfo(client_t *c)
 {
@@ -193,7 +241,6 @@ static int cmd_listproc(client_t *c)
     pclose(p);
     return reply(c, "OK PROCS %s", list) < 0;
 }
-
 
 static const struct { const char *name; const char *shell; } EXEC_TABLE[] = {
     { "DATE",     "date" },
@@ -235,18 +282,6 @@ static int cmd_exec(client_t *c, char **save)
     return reply(c, "OK EXEC_RESULT %s", out) < 0;
 }
 
-/*Filename validation*/
-
-static int valid_filename(const char *s)
-{
-    size_t n = strlen(s);
-    if (n == 0 || n > MAX_FILENAME || s[0] == '.') return 0;
-    for (; *s; s++)
-        if (!isalnum((unsigned char)*s) && *s != '.' && *s != '_' && *s != '-')
-            return 0;
-    return 1;
-}
-
 static int recv_exact(client_t *c, FILE *fp, unsigned long long size)
 {
     unsigned long long left = size;
@@ -285,7 +320,6 @@ static int cmd_put(client_t *c, char **save)
     if (*end || errno) return reply(c, "ERR 009 BAD_ARGUMENTS") < 0;
 
     if (size > MAX_FILE_SIZE) {
-        /* We cannot resynchronise the stream cheaply, so reply and close. */
         log_event("PUT REJECTED %s (%llu bytes, too large) from %s", name, size, c->ip);
         reply(c, "ERR 004 FILE_TOO_LARGE");
         return 1;
@@ -300,7 +334,7 @@ static int cmd_put(client_t *c, char **save)
     }
 
     if (!fp) {                                    
-        int r = recv_exact(c, NULL, size);       
+        int r = recv_exact(c, NULL, size);        
         if (r == -1) return 1;
         if (!valid_filename(name)) return reply(c, "ERR 010 INVALID_FILENAME") < 0;
         return reply(c, "ERR 013 INTERNAL_ERROR") < 0;
@@ -309,7 +343,7 @@ static int cmd_put(client_t *c, char **save)
     int r = recv_exact(c, fp, size);
     if (fclose(fp) != 0 && r == 0) r = -2;
 
-    if (r == -1) {                               
+    if (r == -1) {                                
         unlink(tmp_path);
         log_event("PUT ABORTED %s (client disconnected) from %s", name, c->ip);
         return 1;
@@ -359,7 +393,45 @@ static int cmd_get(client_t *c, char **save)
     return 0;
 }
 
+static int cmd_monitor(client_t *c, char **save)
+{
+    char *sub = strtok_r(NULL, " ", save);
+    if (!sub) return reply(c, "ERR 009 BAD_ARGUMENTS") < 0;
 
+    if (strcmp(sub, "START") == 0) {
+        char *ps    = strtok_r(NULL, " ", save);
+        char *extra = ps ? strtok_r(NULL, " ", save) : NULL;
+        if (!ps || extra || !isdigit((unsigned char)ps[0]))
+            return reply(c, "ERR 009 BAD_ARGUMENTS") < 0;
+        char *end;
+        long port = strtol(ps, &end, 10);
+        if (*end || port < 1 || port > 65535)
+            return reply(c, "ERR 009 BAD_ARGUMENTS") < 0;
+        if (c->mon_active) return reply(c, "ERR 011 ALREADY_MONITORING") < 0;
+
+        c->udp_fd = socket(AF_INET, SOCK_DGRAM, 0);
+        if (c->udp_fd < 0) return reply(c, "ERR 013 INTERNAL_ERROR") < 0;
+        c->udp_dest = c->addr;                       /* Controller's IP ... */
+        c->udp_dest.sin_port = htons((uint16_t)port); /* ... on its UDP port */
+        c->mon_run = 1;
+        if (pthread_create(&c->mon_tid, NULL, monitor_thread, c) != 0) {
+            close(c->udp_fd);
+            return reply(c, "ERR 013 INTERNAL_ERROR") < 0;
+        }
+        c->mon_active = 1;
+        log_event("MONITOR STARTED for %s udp_port=%ld", c->ip, port);
+        return reply(c, "OK MONITOR_STARTED") < 0;
+    }
+
+    if (strcmp(sub, "STOP") == 0) {
+        if (!c->mon_active) return reply(c, "ERR 012 NOT_MONITORING") < 0;
+        stop_monitor(c);
+        return reply(c, "OK MONITOR_STOPPED") < 0;
+    }
+    return reply(c, "ERR 009 BAD_ARGUMENTS") < 0;
+}
+
+/*Command dispatcher*/
 static int handle_command(client_t *c, char *line)
 {
     char *save = NULL;
@@ -381,22 +453,19 @@ static int handle_command(client_t *c, char *line)
         return c->auth_fails >= 3;                
     }
 
-  
     if (!c->authed) return reply(c, "ERR 003 NOT_AUTHENTICATED") < 0;
-
-    if (strcmp(cmd, "QUIT") == 0) {
-        reply(c, "OK BYE");
-        return 1;
-    }
 
     if (strcmp(cmd, "SYSINFO")  == 0) return cmd_sysinfo(c);
     if (strcmp(cmd, "LISTPROC") == 0) return cmd_listproc(c);
     if (strcmp(cmd, "EXEC")     == 0) return cmd_exec(c, &save);
-
     if (strcmp(cmd, "PUT")      == 0) return cmd_put(c, &save);
     if (strcmp(cmd, "GET")      == 0) return cmd_get(c, &save);
-
-    /* Day 3 part 2 adds MONITOR and QUIT cleanup here. */
+    if (strcmp(cmd, "MONITOR")  == 0) return cmd_monitor(c, &save);
+    if (strcmp(cmd, "QUIT")     == 0) {
+        stop_monitor(c);
+        reply(c, "OK BYE");
+        return 1;
+    }
     return reply(c, "ERR 006 UNKNOWN_COMMAND") < 0;
 }
 
@@ -405,18 +474,23 @@ static void *client_thread(void *arg)
 {
     client_t *c = (client_t *)arg;
     inet_ntop(AF_INET, &c->addr.sin_addr, c->ip, sizeof c->ip);
+    pthread_mutex_init(&c->mon_mx, NULL);
+    pthread_cond_init(&c->mon_cv, NULL);
     log_event("CONNECT %s:%d", c->ip, ntohs(c->addr.sin_port));
 
     char line[LINE_MAX_LEN];
     for (;;) {
         int n = read_line(c, line, sizeof line);
         if (n == -2) { reply(c, "ERR 008 LINE_TOO_LONG"); break; }
-        if (n < 0)   break;                        
+        if (n < 0)   break;                       
         if (handle_command(c, line)) break;
     }
 
+    stop_monitor(c);                               
     close(c->fd);
     log_event("DISCONNECT %s:%d", c->ip, ntohs(c->addr.sin_port));
+    pthread_mutex_destroy(&c->mon_mx);
+    pthread_cond_destroy(&c->mon_cv);
     free(c);
     return NULL;
 }
@@ -424,21 +498,21 @@ static void *client_thread(void *arg)
 /*main*/
 int main(void)
 {
-    signal(SIGPIPE, SIG_IGN);       
+    signal(SIGPIPE, SIG_IGN);                      
     mkdir("./agentfiles", 0755);
     mkdir(STORE_DIR, 0755);
 
-    int lfd = socket(AF_INET, SOCK_STREAM, 0);     
+    int lfd = socket(AF_INET, SOCK_STREAM, 0);
     if (lfd < 0) { perror("socket"); return 1; }
 
-    int yes = 1;                                   
+    int yes = 1;
     setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof yes);
 
     struct sockaddr_in sa;
     memset(&sa, 0, sizeof sa);
     sa.sin_family      = AF_INET;
-    sa.sin_addr.s_addr = htonl(INADDR_ANY);       
-    sa.sin_port        = htons(AGENT_PORT);        
+    sa.sin_addr.s_addr = htonl(INADDR_ANY);
+    sa.sin_port        = htons(AGENT_PORT);
 
     if (bind(lfd, (struct sockaddr *)&sa, sizeof sa) < 0) { perror("bind"); return 1; }
     if (listen(lfd, 16) < 0) { perror("listen"); return 1; }
@@ -462,5 +536,6 @@ int main(void)
             free(c);
             continue;
         }
-        pthread_detach(tid);           }
+        pthread_detach(tid);                      
+    }
 }

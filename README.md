@@ -142,7 +142,7 @@ Every command and response is a single line ending in `\n`. Every response ends 
 
 **Security behaviours:** `AUTH` must succeed before any other command; the connection is dropped after 3 failed attempts; the token itself is never written to the log.
 
-**UDP monitoring:** after `MONITOR START <udp_port>`, the Agent sends datagrams to the Controller's IP on that port in the form `SYSINFO <cpu_load> <mem_used_mb> <uptime_sec> SID:0922` at a fixed interval (interval to be stated here once implemented: `___` seconds).
+**UDP monitoring:** after `MONITOR START <udp_port>`, the Agent sends datagrams to the Controller's IP on that port in the form `SYSINFO <cpu_load> <mem_used_mb> <uptime_sec> SID:0922` at a fixed interval (every 2 seconds).
 
 ---
 
@@ -177,8 +177,8 @@ Tick these off as each step is completed and committed.
 - [x] `EXEC` (whitelist)
 - [x] `PUT` (byte-exact upload, `ERR 004` size limit)
 - [x] `GET` (byte-exact download, `ERR 005`)
-- [ ] `MONITOR START` / `MONITOR STOP` (UDP stream)
-- [ ] `QUIT` stops any active monitoring stream
+- [x] `MONITOR START` / `MONITOR STOP` (UDP stream)
+- [x] `QUIT` stops any active monitoring stream
 - [ ] Controller program
 - [ ] Optional extension(s): ___
 
