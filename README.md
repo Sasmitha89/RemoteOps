@@ -175,8 +175,8 @@ Tick these off as each step is completed and committed.
 - [x] `SYSINFO`
 - [x] `LISTPROC`
 - [x] `EXEC` (whitelist)
-- [ ] `PUT` (byte-exact upload, `ERR 004` size limit)
-- [ ] `GET` (byte-exact download, `ERR 005`)
+- [x] `PUT` (byte-exact upload, `ERR 004` size limit)
+- [x] `GET` (byte-exact download, `ERR 005`)
 - [ ] `MONITOR START` / `MONITOR STOP` (UDP stream)
 - [ ] `QUIT` stops any active monitoring stream
 - [ ] Controller program
