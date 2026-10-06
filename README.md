@@ -179,8 +179,8 @@ Tick these off as each step is completed and committed.
 - [x] `GET` (byte-exact download, `ERR 005`)
 - [x] `MONITOR START` / `MONITOR STOP` (UDP stream)
 - [x] `QUIT` stops any active monitoring stream
-- [ ] Controller program
-- [ ] Optional extension(s): ___
+- [x] Controller program
+- [x] Optional extension: transfer throughput (bytes/second) reported by the Controller for PUT and GET
 
 ---
 
