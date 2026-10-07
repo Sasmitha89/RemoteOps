@@ -2,7 +2,7 @@
 
 **Module:** IE3090 Network Programming (Year 3, Semester 1)
 **Student registration number:** IT24102290
-**Language / API:** C, BSD sockets (`sys/socket.h`), POSIX threads
+**Language:** C, BSD sockets (`sys/socket.h`), POSIX threads
 **Platform:** Linux (developed and tested on CentOS, compiled with `gcc`)
 
 RemoteOps consists of an **Agent** (the server, running on the managed machine) and a **Controller** (the client, used by an administrator). They communicate over a fixed, line-based text protocol on TCP, with a secondary UDP channel for periodic system monitoring.
